@@ -15,10 +15,11 @@ export function generate(
   options: CodegenOptions = {},
 ): CodegenResult {
   let code = ''
-  let preamble = ''
+  let preamble = '' // 需要放在前面的代码，如 import，const
 
   const { helpers, vaporHelpers } = ir
 
+  // 生成静态节点代码
   ir.template.forEach((template, i) => {
     if (template.type === IRNodeTypes.TEMPLATE_FACTORY) {
       preamble += `const t${i} = template(${JSON.stringify(
@@ -26,6 +27,7 @@ export function generate(
       )})\n`
       vaporHelpers.add('template')
     } else {
+      // todo fragment 什么情况下会出现？
       // fragment
       code += `const t0 = fragment()\n`
       vaporHelpers.add('fragment')
@@ -33,17 +35,19 @@ export function generate(
   })
 
   {
-    code += `const n${ir.dynamic.id} = t0()\n`
+    // 生成动态节点代码
+    code += `const n${ir.dynamic.id} = t0()\n` // 生成运行时静态节点
 
     const children = genChildren(ir.dynamic.children)
     if (children) {
-      code += `const ${children} = children(n${ir.dynamic.id})\n`
+      code += `const ${children} = children(n${ir.dynamic.id})\n` // children 函数序列化运行时静态节点，通过解构引用节点
       vaporHelpers.add('children')
     }
 
     for (const operation of ir.operation) {
       code += genOperation(operation)
     }
+    // 对引用节点生成响应式更新操作
     for (const [_expr, operations] of Object.entries(ir.effect)) {
       let scope = `effect(() => {\n`
       vaporHelpers.add('effect')
@@ -64,6 +68,7 @@ export function generate(
   if (helpers.size)
     preamble = `import { ${[...helpers].join(', ')} } from 'vue'\n` + preamble
 
+  // 上面生成的代码用 render 函数包起来
   const functionName = options.ssr ? `ssrRender` : `render`
   const isSetupInlined = !!options.inline
   if (isSetupInlined) {
@@ -78,6 +83,7 @@ export function generate(
     preamble,
   }
 
+  // 生成引用节点的添加/更新操作
   function genOperation(oper: OperationNode) {
     let code = ''
 
@@ -147,22 +153,41 @@ export function generate(
   }
 }
 
+/**
+ * 遍历所有引用节点 children
+ * child 的 key 是其在父节点中的顺序，child.placeholder/id 是引用节点编译时生成的 id
+ * 通过 index 和 id 生成一个解构对象，在运行时通过解构获得引用节点
+ * {
+ *  0: [
+ *      n1, {
+ *          1: [n2],
+ *        }
+ *      ],
+ *  2: [n3]
+ * }
+ * @param children
+ */
 function genChildren(children: DynamicChildren) {
   let code = ''
   // TODO
   let offset = 0
   for (const [index, child] of Object.entries(children)) {
     const childrenLength = Object.keys(child.children).length
+    // 保存无须生成的节点的偏移量。无须生成是因为包含在上一次生成的代码中，连续的动态节点是批量插入的
     if (child.ghost && child.placeholder === null && childrenLength === 0) {
       offset--
       continue
     }
 
+    // 拼接解构对象内容，index 是节点顺序
     code += ` ${Number(index) + offset}: [`
 
+    // 拼接解构对象内容，id 是引用节点生成顺序
+    // 当前节点如果是需要插入的动态节点，则取其关联的引用节点 placeholder
     const id = child.ghost ? child.placeholder : child.id
     if (id !== null) code += `n${id}`
 
+    // 递归生成解构对象
     const childrenString = childrenLength && genChildren(child.children)
     if (childrenString) code += `, ${childrenString}`
 

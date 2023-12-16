@@ -31,16 +31,16 @@ export interface TransformContext<T extends Node = Node> {
   index: number
   options: TransformOptions
 
-  template: string
-  dynamic: DynamicInfo
+  template: string // 静态节点内容
+  dynamic: DynamicInfo // 动态节点内容
 
   once: boolean
 
-  reference(): number
-  incraseId(): number
-  registerTemplate(): number
-  registerEffect(expr: string, operation: OperationNode): void
-  registerOpration(...oprations: OperationNode[]): void
+  reference(): number // 注册/获取引用节点的 id
+  incraseId(): number // 增加引用节点 id
+  registerTemplate(): number // 添加根节点 <template></template>
+  registerEffect(expr: string, operation: OperationNode): void // 订阅响应式对象 expr，注册事件 operation
+  registerOpration(...oprations: OperationNode[]): void // 注册动态节点添加/更新操作
   helper(name: string): string
 }
 
@@ -49,7 +49,7 @@ function createRootContext(
   node: RootNode,
   options: TransformOptions,
 ): TransformContext<RootNode> {
-  let globalId = 0
+  let globalId = 0 // 引用节点 id，在根节点中共享
   const { effect, operation: operation, helpers, vaporHelpers } = ir
 
   const ctx: TransformContext<RootNode> = {
@@ -103,7 +103,7 @@ function createRootContext(
     },
   }
   ctx.root = ctx
-  ctx.reference()
+  ctx.reference() // 根节点的引用节点 id 为 0
   return ctx
 }
 
@@ -176,7 +176,7 @@ function transformChildren(
   const {
     node: { children },
   } = ctx
-  const childrenTemplate: string[] = []
+  const childrenTemplate: string[] = [] // 保存转换完成后的静态节点列表
   children.forEach((child, i) => walkNode(child, i))
 
   processDynamicChildren()
@@ -184,26 +184,35 @@ function transformChildren(
 
   if (root) ctx.registerTemplate()
 
+  // 循环所有的子节点，以引用节点（静态节点）为锚点，注册插入动态节点的操作
   function processDynamicChildren() {
     let prevChildren: DynamicInfo[] = []
     let hasStatic = false
     for (let index = 0; index < children.length; index++) {
       const child = ctx.dynamic.children[index]
 
+      // 静态节点 或 引用节点（静态节点）
       if (!child || !child.ghost) {
         if (prevChildren.length)
           if (hasStatic) {
-            childrenTemplate[index - prevChildren.length] = `<!>`
+            // 动态节点在中间，当前遍历到的节点是 c
+            // a{{b}}c
+            childrenTemplate[index - prevChildren.length] = `<!>` // 添加动态节点占位符。todo 占位符具体作用未知
+            // 把当前节点注册为引用节点，即锚点
+            // 需要插入的动态节点通过 placeholder 关联引用节点（静态节点）
             const anchor = (prevChildren[0].placeholder = ctx.incraseId())
 
+            // 注册插入节点操作，在 anchor 前面插入动态节点
             ctx.registerOpration({
               type: IRNodeTypes.INSERT_NODE,
               loc: ctx.node.loc,
-              element: prevChildren.map((child) => child.id!),
+              element: prevChildren.map((child) => child.id!), // prevChildren 保存了需要插入的动态节点
               parent: ctx.reference(),
               anchor,
             })
           } else {
+            // 动态节点在前面。注册插入节点操作，在 parent 的子节点最前面插入动态节点
+            // {{a}}b
             ctx.registerOpration({
               type: IRNodeTypes.PREPEND_NODE,
               loc: ctx.node.loc,
@@ -216,8 +225,11 @@ function transformChildren(
         continue
       }
 
+      // 需要插入的动态节点
       prevChildren.push(child)
 
+      // 动态节点在后面。注册插入节点操作，在 parent 的子节点最后面插入动态节点
+      // a{{b}}
       if (index === children.length - 1) {
         ctx.registerOpration({
           type: IRNodeTypes.APPEND_NODE,
@@ -229,6 +241,7 @@ function transformChildren(
     }
   }
 
+  // 对 template 节点进行转换
   function walkNode(node: TemplateChildNode, index: number) {
     const child = createContext(node, ctx, index)
     const isFirst = index === 0
@@ -236,18 +249,22 @@ function transformChildren(
 
     switch (node.type) {
       case 1 satisfies NodeTypes.ELEMENT: {
+        // 转换节点标签和 props，并调用 transformChildren 递归解析子节点
         transformElement(child as TransformContext<ElementNode>)
         break
       }
       case 2 satisfies NodeTypes.TEXT: {
+        // 拼接文本
         child.template += node.content
         break
       }
       case 3 satisfies NodeTypes.COMMENT: {
+        // 拼接注释
         child.template += `<!--${node.content}-->`
         break
       }
       case 5 satisfies NodeTypes.INTERPOLATION: {
+        // 转换动态节点内容，即 template 的 {{}} 双尖括号
         transformInterpolation(
           child as TransformContext<InterpolationNode>,
           isFirst,
@@ -268,8 +285,12 @@ function transformChildren(
       }
     }
 
+    // 转换完成的静态节点内容先存起来
     childrenTemplate.push(child.template)
 
+    // 保存引用节点到 children 中，有两个地方用到
+    // 1. 在 processDynamicChildren 中，注册插入动态节点操作
+    // 2. 生成运行时代码时：利用 index 和 dynamic.id 生成解构对象，获得引用节点（静态节点）
     if (
       child.dynamic.ghost ||
       child.dynamic.referenced ||
@@ -287,7 +308,7 @@ function transformElement(ctx: TransformContext<ElementNode>) {
 
   ctx.template += `<${tag}`
 
-  props.forEach((prop) => transformProp(prop, ctx))
+  props.forEach((prop) => transformProp(prop, ctx)) // 转换 props
   ctx.template += `>`
 
   if (children.length) transformChildren(ctx)
@@ -298,6 +319,7 @@ function transformElement(ctx: TransformContext<ElementNode>) {
   }
 }
 
+// 对动态节点注册 创建节点操作 和 响应式更新操作
 function transformInterpolation(
   ctx: TransformContext<InterpolationNode>,
   isFirst: boolean,
@@ -305,16 +327,19 @@ function transformInterpolation(
 ) {
   const { node } = ctx
 
+  // 复合表达式
   if (node.content.type === (8 satisfies NodeTypes.COMPOUND_EXPRESSION)) {
     // TODO: CompoundExpressionNode: {{ count + 1 }}
     return
   }
 
-  const expr = processExpression(ctx, node.content)!
+  const expr = processExpression(ctx, node.content)! // 获取响应式对象，例如 obj.value
 
   if (isFirst && isLast) {
+    // 只有一个子节点，即 {{count}}。直接注册父元素操作即可
     const parent = ctx.parent!
-    const parentId = parent.reference()
+    const parentId = parent.reference() // 添加父节点为引用节点
+    // 注册响应式更新操作
     ctx.registerEffect(expr, {
       type: IRNodeTypes.SET_TEXT,
       loc: node.loc,
@@ -322,14 +347,16 @@ function transformInterpolation(
       value: expr,
     })
   } else {
-    const id = ctx.reference()
+    const id = ctx.reference() // 注册创建的节点为引用节点
     ctx.dynamic.ghost = true
+    // 注册创建动态节点操作
     ctx.registerOpration({
       type: IRNodeTypes.CREATE_TEXT_NODE,
       loc: node.loc,
       id,
       value: expr,
     })
+    // 注册响应式更新操作
     ctx.registerEffect(expr, {
       type: IRNodeTypes.SET_TEXT,
       loc: node.loc,
@@ -339,6 +366,7 @@ function transformInterpolation(
   }
 }
 
+// 转换 props，如果是响应式对象，注册响应式操作
 function transformProp(
   node: DirectiveNode | AttributeNode,
   ctx: TransformContext<ElementNode>,
@@ -384,10 +412,11 @@ function transformProp(
         return
       }
 
+      // 注册响应式更新操作
       ctx.registerEffect(expr, {
         type: IRNodeTypes.SET_PROP,
         loc: node.loc,
-        element: ctx.reference(),
+        element: ctx.reference(), // 添加当前节点为引用节点
         name: node.arg.content,
         value: expr,
       })
@@ -455,6 +484,7 @@ function transformProp(
   }
 }
 
+// 给响应式对象加上.value取值
 // TODO: reuse packages/compiler-core/src/transforms/transformExpression.ts
 function processExpression(
   ctx: TransformContext,
